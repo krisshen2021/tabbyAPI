@@ -1,8 +1,8 @@
 # Respect to TabbyAPI.
  Just make it more easier to start up api service a bit.
 
-> This fork added a shell file **"runtabby.sh"**, it will download new model from huggingface to subfolder model for you,
-> and let you select downloaded model automatically,
+> This fork added a shell file **"runtabby.sh"** for user who run tabby in linux or wsl,
+> it will download new model from huggingface to subfolder model for you, and let you select downloaded model automatically,
 and give you chance to select more options to start tabby api, you can edit config.yml, but it's more easy for change these things every start up.
 > add more fine-tuned chat templates like alpaca, alpaca for sillytavern, nexus for function call model nexusraven v2, will add more in the future
 > 
