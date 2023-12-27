@@ -1,0 +1,38 @@
+### Instruction:
+{% set ns = namespace(found=false, name='') %}
+{% for message in messages %}
+{% if message['role'] == 'system' %}
+{{ message['content']|trim -}}
+{% if not loop.last %}
+
+{% endif %}
+{% endif %}
+{% endfor %}
+{% for message in messages %}
+{% if message['role'] == 'user' %}
+### Input:
+{% if message['name'] %}
+{{ message['name']|trim -}}: {% endif %}{{ message['content']|trim -}}
+{% if not loop.last %}
+
+{% endif %}
+{% elif message['role'] == 'assistant' %}
+### Response:
+{% if message['name'] %}
+{% if not ns.found %}
+{% set ns.found = true %}
+{% set ns.name = message['name'] %}
+{% endif %}
+{{ message['name']|trim -}}: {% endif %}{{ message['content']|trim -}}
+{% if not loop.last %}
+
+{% endif %}
+{% endif %}
+{% endfor %}
+
+{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}
+### Response:
+{% if ns.found == true %}
+{{ ns.name }}: 
+{% endif %}
+{% endif %}
