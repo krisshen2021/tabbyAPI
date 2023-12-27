@@ -20,6 +20,8 @@ progress
 uvicorn
 jinja2 >= 3.0.0
 colorlog
+requests
+tqdm
 
 # Flash attention v2
 
