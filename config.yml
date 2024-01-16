@@ -11,12 +11,12 @@ network:
   host: 0.0.0.0
 
   # The port to host on (default: 5000)
-  port: 5002
+  port: 5001
 
   # Disable HTTP token authenticaion with requests
   # WARNING: This will make your instance vulnerable!
   # Turn on this option if you are ONLY connecting from localhost
-  disable_auth: True
+  disable_auth: False
 
 # Options for logging
 logging:
@@ -34,7 +34,7 @@ model:
 
   # An initial model to load. Make sure the model is located in the model directory!
   # A model can be loaded later via the API.
-  model_name: TheBloke_NexusRaven-V2-13B-GPTQ
+  model_name: TheBloke_MLewd-v2.4-13B-GPTQ
 
   # Sends dummy model names when the models endpoint is queried
   # Enable this if the program is looking for a specific OAI model
@@ -44,7 +44,7 @@ model:
 
   # Max sequence length (default: None)
   # Fetched from the model's base sequence length in config.json by default
-  max_seq_len: 2048
+  max_seq_len: 4096
 
   # Overrides base model context length (default: None)
   # WARNING: Don't set this unless you know what you're doing!
@@ -75,7 +75,7 @@ model:
 
   # Set the prompt template for this model. If empty, chat completions will be disabled. (default: None)
   # NOTE: Only works with chat completion message lists!
-  prompt_template: template_nexus
+  prompt_template: None
 
   # Number of experts to use per token. Loads from the model's config.json if not specified (default: None)
   # WARNING: Don't set this unless you know what you're doing!
@@ -89,7 +89,7 @@ model:
 
     # An initial draft model to load. Make sure this model is located in the model directory!
     # A draft model can be loaded later via the API.
-    #draft_model_name: TheBloke_NexusRaven-V2-13B-GPTQ
+    #draft_model_name: TheBloke_MLewd-v2.4-13B-GPTQ
   
     # Rope scale for draft models (default: 1.0)
     # Same thing as compress_pos_emb

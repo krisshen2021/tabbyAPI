@@ -43,7 +43,7 @@
 
 {% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}
 ### Assistant:
-Sure,the final results is:
+The final results:
 {% if ns.found == true %}
 {{ ns.name }}:
 {% endif %}
