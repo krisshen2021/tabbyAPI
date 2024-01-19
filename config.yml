@@ -11,7 +11,7 @@ network:
   host: 0.0.0.0
 
   # The port to host on (default: 5000)
-  port: 5002
+  port: 5003
 
   # Disable HTTP token authenticaion with requests
   # WARNING: This will make your instance vulnerable!
@@ -34,7 +34,7 @@ model:
 
   # An initial model to load. Make sure the model is located in the model directory!
   # A model can be loaded later via the API.
-  model_name: TheBloke_gorilla-openfunctions-v1-GPTQ
+  model_name: TheBloke_dolphin-2.6-mistral-7B-dpo-laser-GPTQ
 
   # Sends dummy model names when the models endpoint is queried
   # Enable this if the program is looking for a specific OAI model
@@ -44,7 +44,7 @@ model:
 
   # Max sequence length (default: None)
   # Fetched from the model's base sequence length in config.json by default
-  max_seq_len: 1024
+  max_seq_len: 2048
 
   # Overrides base model context length (default: None)
   # WARNING: Don't set this unless you know what you're doing!
@@ -75,7 +75,7 @@ model:
 
   # Set the prompt template for this model. If empty, chat completions will be disabled. (default: None)
   # NOTE: Only works with chat completion message lists!
-  prompt_template: template_gorilla
+  prompt_template: template_chatML
 
   # Number of experts to use per token. Loads from the model's config.json if not specified (default: None)
   # WARNING: Don't set this unless you know what you're doing!
@@ -89,7 +89,7 @@ model:
 
     # An initial draft model to load. Make sure this model is located in the model directory!
     # A draft model can be loaded later via the API.
-    #draft_model_name: TheBloke_gorilla-openfunctions-v1-GPTQ
+    #draft_model_name: TheBloke_dolphin-2.6-mistral-7B-dpo-laser-GPTQ
   
     # Rope scale for draft models (default: 1.0)
     # Same thing as compress_pos_emb

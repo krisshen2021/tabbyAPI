@@ -1,5 +1,6 @@
 """The main tabbyAPI module. Contains the FastAPI server and endpoints."""
 import pathlib
+import pynvml
 import uvicorn
 from asyncio import CancelledError
 from typing import Optional
@@ -71,6 +72,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+#GPU list endpoint
+@app.get("/v1/gpu")
+async def get_gpu_info():
+    pynvml.nvmlInit()
+    device_count = pynvml.nvmlDeviceGetCount()
+    gpu_info = []
+
+    for i in range(device_count):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+        gpu_name = pynvml.nvmlDeviceGetName(handle)
+        memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        total_memory_gb = int(memory_info.total / (1024 ** 3))  # Convert to GB
+        gpu_info.append({
+            "GPU": i,
+            "Name": gpu_name,
+            "GPU_Memory": total_memory_gb
+        })
+
+    pynvml.nvmlShutdown()
+    return {"GPU Count": device_count, "GPU Info": gpu_info}
 
 # Model list endpoint
 @app.get("/v1/models", dependencies=[Depends(check_api_key)])
