@@ -77,15 +77,12 @@ app.add_middleware(
 #SD Picture Generator
 @app.post("/v1/SDapi")
 async def SD_api_generate(payload: SDPayload, SD_URL: str = Header(None)):
-    payload_dict = payload.model_dump_json()
+    payload_dict = payload.model_dump()
     # timeout = httpx.Timeout(10.0, read=120.0)
     # async with httpx.AsyncClient(timeout=timeout) as client:
         # response = await client.post(SD_URL, json=payload_dict)
-    response = requests.post(url=SD_URL,json=payload_dict)
-    if response.status_code == 200:
-        return response
-    else:
-        return False
+    response = requests.post(url=SD_URL, json=payload_dict)
+    return response
 # GPU list endpoint
 @app.get("/v1/gpu")
 async def get_gpu_info():
