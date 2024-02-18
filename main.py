@@ -76,7 +76,7 @@ app.add_middleware(
 #SD Picture Generator
 @app.post("/v1/SDapi")
 async def SD_api_generate(payload: SDPayload, SD_URL: str = Header(None)):
-    payload_dict = payload.dict()
+    payload_dict = payload.model_dump()
     timeout = httpx.Timeout(10.0, read=120.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(SD_URL, json=payload_dict)
