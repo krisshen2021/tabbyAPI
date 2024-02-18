@@ -7,7 +7,7 @@ from asyncio import CancelledError
 from typing import Optional
 from uuid import uuid4
 from jinja2 import TemplateError
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from functools import partial
@@ -75,10 +75,10 @@ app.add_middleware(
 )
 #SD Picture Generator
 @app.post("/v1/SDapi")
-async def SD_api_generate(url:str, payload:SDPayload):
+async def SD_api_generate(payload: SDPayload, SD_URL: str = Header(None)):
     payload_dict = payload.dict()
     async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=payload_dict)
+        response = await client.post(SD_URL, json=payload_dict)
         if response.status_code == 200:
             return response
         else:
