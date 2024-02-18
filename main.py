@@ -2,7 +2,6 @@
 import pathlib
 import requests
 import pynvml
-import httpx
 import uvicorn
 from asyncio import CancelledError
 from typing import Optional
@@ -78,11 +77,7 @@ app.add_middleware(
 @app.post("/v1/SDapi")
 async def SD_api_generate(payload: SDPayload, SD_URL: str = Header(None)):
     payload_dict = payload.model_dump()
-    # timeout = httpx.Timeout(10.0, read=120.0)
-    # async with httpx.AsyncClient(timeout=timeout) as client:
-        # response = await client.post(SD_URL, json=payload_dict)
     print(SD_URL)
-    print(payload_dict)
     response = requests.post(url=SD_URL, json=payload_dict)
     response_pic = response.json()
     return response_pic
