@@ -77,7 +77,8 @@ app.add_middleware(
 @app.post("/v1/SDapi")
 async def SD_api_generate(payload: SDPayload, SD_URL: str = Header(None)):
     payload_dict = payload.dict()
-    async with httpx.AsyncClient() as client:
+    timeout = httpx.Timeout(10.0, read=120.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(SD_URL, json=payload_dict)
         if response.status_code == 200:
             return response
