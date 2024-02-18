@@ -77,10 +77,20 @@ app.add_middleware(
 @app.post("/v1/SDapi")
 async def SD_api_generate(payload: SDPayload, SD_URL: str = Header(None)):
     payload_dict = payload.model_dump()
-    print(SD_URL)
-    response = requests.post(url=SD_URL, json=payload_dict)
-    response_pic = response.json()
-    return response_pic
+    print(f'>>>Generate Image from {SD_URL}')
+    response = requests.post(url=SD_URL, json=payload_dict).json()
+    return response
+
+#SD model list
+@app.post("/v1/SDapiModelList")
+async def SD_api_modellist(SD_URL: str = Header(None)):
+    print(f'>>>Getting Model list from {SD_URL}')
+    headers = {
+            'accept': 'application/json'
+        }
+    response = requests.get(url=SD_URL, headers=headers).json()
+    return response
+
 # GPU list endpoint
 @app.get("/v1/gpu")
 async def get_gpu_info():
