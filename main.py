@@ -81,6 +81,8 @@ async def SD_api_generate(payload: SDPayload, SD_URL: str = Header(None)):
     # timeout = httpx.Timeout(10.0, read=120.0)
     # async with httpx.AsyncClient(timeout=timeout) as client:
         # response = await client.post(SD_URL, json=payload_dict)
+    print(SD_URL)
+    print(payload_dict)
     response = requests.post(url=SD_URL, json=payload_dict)
     return response
 # GPU list endpoint
