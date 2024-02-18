@@ -84,7 +84,8 @@ async def SD_api_generate(payload: SDPayload, SD_URL: str = Header(None)):
     print(SD_URL)
     print(payload_dict)
     response = requests.post(url=SD_URL, json=payload_dict)
-    return response
+    response_pic = response.json()
+    return response_pic
 # GPU list endpoint
 @app.get("/v1/gpu")
 async def get_gpu_info():
