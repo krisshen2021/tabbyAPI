@@ -1,11 +1,33 @@
 """ Contains model card types. """
 from time import time
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from pydantic import BaseModel, Field, ConfigDict
 
 from gen_logging import LogPreferences
 
+class OverrideSettings(BaseModel):
+    sd_vae: Optional[str] = None
+    sd_model_checkpoint: Optional[str] = None
+
+class SDPayload(BaseModel):
+    hr_negative_prompt: Optional[str] = None
+    hr_prompt: str
+    hr_scale: Optional[float] = None
+    hr_second_pass_steps: Optional[int] = None
+    seed: Optional[int] = None
+    enable_hr: Optional[bool] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    hr_upscaler: Optional[str] = None
+    negative_prompt: Optional[str] = None
+    prompt: str
+    sampler_name: Optional[str] = None
+    cfg_scale: Optional[float] = None
+    denoising_strength: Optional[float] = None
+    steps: Optional[int] = None
+    override_settings: Optional[OverrideSettings] = None
+    override_settings_restore_afterwards: Optional[bool] = None
 
 class ModelCardParameters(BaseModel):
     """Represents model card parameters."""

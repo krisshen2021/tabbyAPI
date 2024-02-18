@@ -1,6 +1,7 @@
 """The main tabbyAPI module. Contains the FastAPI server and endpoints."""
 import pathlib
 import pynvml
+import httpx
 import uvicorn
 from asyncio import CancelledError
 from typing import Optional
@@ -32,6 +33,7 @@ from OAI.types.model import (
     ModelLoadRequest,
     ModelLoadResponse,
     ModelCardParameters,
+    SDPayload,
 )
 from OAI.types.token import (
     TokenEncodeRequest,
@@ -71,8 +73,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-#GPU list endpoint
+#SD Picture Generator
+@app.post("/v1/SDapi")
+async def SD_api_generate(url:str, payload:SDPayload):
+    payload_dict = payload.dict()
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=payload_dict)
+        if response.status_code == 200:
+            return response
+        else:
+            return False
+# GPU list endpoint
 @app.get("/v1/gpu")
 async def get_gpu_info():
     pynvml.nvmlInit()
