@@ -1,7 +1,8 @@
 """The main tabbyAPI module. Contains the FastAPI server and endpoints."""
-import pathlib
 import requests
 import pynvml
+import os
+import pathlib
 import uvicorn
 from asyncio import CancelledError
 from typing import Optional
@@ -13,9 +14,15 @@ from fastapi.responses import StreamingResponse
 from functools import partial
 from progress.bar import IncrementalBar
 
-import gen_logging
-from auth import check_admin_key, check_api_key, load_auth_keys
-from config import (
+import common.gen_logging as gen_logging
+from backends.exllamav2.model import ExllamaV2Container
+from backends.exllamav2.utils import check_exllama_version
+from common.args import convert_args_to_dict, init_argparser
+from common.auth import check_admin_key, check_api_key, load_auth_keys
+from common.config import (
+    get_developer_config,
+    get_sampling_config,
+    override_config_from_args,
     read_config_from_file,
     get_gen_logging_config,
     get_model_config,
@@ -23,8 +30,19 @@ from config import (
     get_lora_config,
     get_network_config,
 )
-from generators import call_with_semaphore, generate_with_semaphore
-from model import ModelContainer
+from common.generators import call_with_semaphore, generate_with_semaphore
+from common.sampling import (
+    get_sampler_overrides,
+    set_overrides_from_file,
+    set_overrides_from_dict,
+)
+from common.templating import (
+    get_all_templates,
+    get_prompt_from_template,
+    get_template_from_file,
+)
+from common.utils import get_generator_error, get_sse_packet, load_progress, unwrap
+from common.logger import init_logger
 from OAI.types.completion import CompletionRequest
 from OAI.types.chat_completion import ChatCompletionRequest
 from OAI.types.lora import LoraCard, LoraList, LoraLoadRequest, LoraLoadResponse
@@ -35,44 +53,33 @@ from OAI.types.model import (
     ModelCardParameters,
     SDPayload,
 )
+from OAI.types.sampler_overrides import SamplerOverrideSwitchRequest
+from OAI.types.template import TemplateList, TemplateSwitchRequest
 from OAI.types.token import (
     TokenEncodeRequest,
     TokenEncodeResponse,
     TokenDecodeRequest,
     TokenDecodeResponse,
 )
-from OAI.utils_oai import (
+from OAI.utils.completion import (
     create_completion_response,
-    get_model_list,
-    get_lora_list,
     create_chat_completion_response,
     create_chat_completion_stream_chunk,
 )
-from templating import get_prompt_from_template
-from utils import get_generator_error, get_sse_packet, load_progress, unwrap
-from logger import init_logger
+from OAI.utils.model import get_model_list
+from OAI.utils.lora import get_lora_list
 
 logger = init_logger(__name__)
 
-app = FastAPI()
-
-# Globally scoped variables. Undefined until initalized in main
-MODEL_CONTAINER: Optional[ModelContainer] = None
-
-
-def _check_model_container():
-    if MODEL_CONTAINER is None or MODEL_CONTAINER.model is None:
-        raise HTTPException(400, "No models are loaded.")
-
-
-# ALlow CORS requests
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = FastAPI(
+    title="TabbyAPI",
+    summary="An OAI compatible exllamav2 API that's both lightweight and fast",
+    description=(
+        "This docs page is not meant to send requests! Please use a service "
+        "like Postman or a frontend UI."
+    ),
 )
+
 #SD Picture Generator
 @app.post("/v1/SDapi")
 async def SD_api_generate(payload: SDPayload, SD_URL: str = Header(None)):
@@ -111,6 +118,25 @@ async def get_gpu_info():
 
     pynvml.nvmlShutdown()
     return {"GPU Count": device_count, "GPU Info": gpu_info}
+
+# Globally scoped variables. Undefined until initalized in main
+MODEL_CONTAINER: Optional[ExllamaV2Container] = None
+
+
+def _check_model_container():
+    if MODEL_CONTAINER is None or MODEL_CONTAINER.model is None:
+        raise HTTPException(400, "No models are loaded.")
+
+
+# ALlow CORS requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # Model list endpoint
 @app.get("/v1/models", dependencies=[Depends(check_api_key)])
@@ -151,6 +177,8 @@ async def get_current_model():
             max_seq_len=MODEL_CONTAINER.config.max_seq_len,
             cache_mode="FP8" if MODEL_CONTAINER.cache_fp8 else "FP16",
             prompt_template=prompt_template.name if prompt_template else None,
+            num_experts_per_token=MODEL_CONTAINER.config.num_experts_per_token,
+            use_cfg=MODEL_CONTAINER.use_cfg,
         ),
         logging=gen_logging.PREFERENCES,
     )
@@ -210,7 +238,7 @@ async def load_model(request: Request, data: ModelLoadRequest):
     if not model_path.exists():
         raise HTTPException(400, "model_path does not exist. Check model_name?")
 
-    MODEL_CONTAINER = ModelContainer(model_path.resolve(), False, **load_data)
+    MODEL_CONTAINER = ExllamaV2Container(model_path.resolve(), False, **load_data)
 
     async def generator():
         """Generator for the loading process."""
@@ -264,7 +292,7 @@ async def load_model(request: Request, data: ModelLoadRequest):
 
 
 # Unload model endpoint
-@app.get(
+@app.post(
     "/v1/model/unload",
     dependencies=[Depends(check_admin_key), Depends(_check_model_container)],
 )
@@ -274,6 +302,81 @@ async def unload_model():
 
     MODEL_CONTAINER.unload()
     MODEL_CONTAINER = None
+
+
+@app.get("/v1/templates", dependencies=[Depends(check_api_key)])
+@app.get("/v1/template/list", dependencies=[Depends(check_api_key)])
+async def get_templates():
+    templates = get_all_templates()
+    template_strings = list(map(lambda template: template.stem, templates))
+    return TemplateList(data=template_strings)
+
+
+@app.post(
+    "/v1/template/switch",
+    dependencies=[Depends(check_admin_key), Depends(_check_model_container)],
+)
+async def switch_template(data: TemplateSwitchRequest):
+    """Switch the currently loaded template"""
+    if not data.name:
+        raise HTTPException(400, "New template name not found.")
+
+    try:
+        template = get_template_from_file(data.name)
+        MODEL_CONTAINER.prompt_template = template
+    except FileNotFoundError as e:
+        raise HTTPException(400, "Template does not exist. Check the name?") from e
+
+
+@app.post(
+    "/v1/template/unload",
+    dependencies=[Depends(check_admin_key), Depends(_check_model_container)],
+)
+async def unload_template():
+    """Unloads the currently selected template"""
+
+    MODEL_CONTAINER.prompt_template = None
+
+
+# Sampler override endpoints
+@app.get("/v1/sampling/overrides", dependencies=[Depends(check_api_key)])
+@app.get("/v1/sampling/override/list", dependencies=[Depends(check_api_key)])
+async def list_sampler_overrides():
+    """API wrapper to list all currently applied sampler overrides"""
+
+    return get_sampler_overrides()
+
+
+@app.post(
+    "/v1/sampling/override/switch",
+    dependencies=[Depends(check_admin_key)],
+)
+async def switch_sampler_override(data: SamplerOverrideSwitchRequest):
+    """Switch the currently loaded override preset"""
+
+    if data.preset:
+        try:
+            set_overrides_from_file(data.preset)
+        except FileNotFoundError as e:
+            raise HTTPException(
+                400, "Sampler override preset does not exist. Check the name?"
+            ) from e
+    elif data.overrides:
+        set_overrides_from_dict(data.overrides)
+    else:
+        raise HTTPException(
+            400, "A sampler override preset or dictionary wasn't provided."
+        )
+
+
+@app.post(
+    "/v1/sampling/override/unload",
+    dependencies=[Depends(check_admin_key)],
+)
+async def unload_sampler_override():
+    """Unloads the currently selected override preset"""
+
+    set_overrides_from_dict({})
 
 
 # Lora list endpoint
@@ -338,7 +441,7 @@ async def load_lora(data: LoraLoadRequest):
 
 
 # Unload lora endpoint
-@app.get(
+@app.post(
     "/v1/lora/unload",
     dependencies=[Depends(check_admin_key), Depends(_check_model_container)],
 )
@@ -354,11 +457,8 @@ async def unload_loras():
 )
 async def encode_tokens(data: TokenEncodeRequest):
     """Encodes a string into tokens."""
-    raw_tokens = MODEL_CONTAINER.get_tokens(data.text, None, **data.get_params())
-
-    # Have to use this if check otherwise Torch's tensors error out
-    # with a boolean issue
-    tokens = raw_tokens[0].tolist() if raw_tokens is not None else []
+    raw_tokens = MODEL_CONTAINER.encode_tokens(data.text, **data.get_params())
+    tokens = unwrap(raw_tokens, [])
     response = TokenEncodeResponse(tokens=tokens, length=len(tokens))
 
     return response
@@ -371,7 +471,7 @@ async def encode_tokens(data: TokenEncodeRequest):
 )
 async def decode_tokens(data: TokenDecodeRequest):
     """Decodes tokens into a string."""
-    message = MODEL_CONTAINER.get_tokens(None, data.tokens, **data.get_params())
+    message = MODEL_CONTAINER.decode_tokens(data.tokens, **data.get_params())
     response = TokenDecodeResponse(text=unwrap(message, ""))
 
     return response
@@ -389,7 +489,11 @@ async def generate_completion(request: Request, data: CompletionRequest):
     if isinstance(data.prompt, list):
         data.prompt = "\n".join(data.prompt)
 
-    if data.stream:
+    disable_request_streaming = unwrap(
+        get_developer_config().get("disable_request_streaming"), False
+    )
+
+    if data.stream and not disable_request_streaming:
 
         async def generator():
             """Generator for the generation process."""
@@ -397,13 +501,11 @@ async def generate_completion(request: Request, data: CompletionRequest):
                 new_generation = MODEL_CONTAINER.generate_gen(
                     data.prompt, **data.to_gen_params()
                 )
-                for part, prompt_tokens, completion_tokens in new_generation:
+                for generation in new_generation:
                     if await request.is_disconnected():
                         break
 
-                    response = create_completion_response(
-                        part, prompt_tokens, completion_tokens, model_path.name
-                    )
+                    response = create_completion_response(generation, model_path.name)
 
                     yield get_sse_packet(response.model_dump_json())
 
@@ -418,13 +520,10 @@ async def generate_completion(request: Request, data: CompletionRequest):
             generate_with_semaphore(generator), media_type="text/event-stream"
         )
 
-    response_text, prompt_tokens, completion_tokens = await call_with_semaphore(
+    generation = await call_with_semaphore(
         partial(MODEL_CONTAINER.generate, data.prompt, **data.to_gen_params())
     )
-
-    response = create_completion_response(
-        response_text, prompt_tokens, completion_tokens, model_path.name
-    )
+    response = create_completion_response(generation, model_path.name)
 
     return response
 
@@ -471,7 +570,11 @@ async def generate_chat_completion(request: Request, data: ChatCompletionRequest
                 f"TemplateError: {str(exc)}",
             ) from exc
 
-    if data.stream:
+    disable_request_streaming = unwrap(
+        get_developer_config().get("disable_request_streaming"), False
+    )
+
+    if data.stream and not disable_request_streaming:
         const_id = f"chatcmpl-{uuid4().hex}"
 
         async def generator():
@@ -480,12 +583,12 @@ async def generate_chat_completion(request: Request, data: ChatCompletionRequest
                 new_generation = MODEL_CONTAINER.generate_gen(
                     prompt, **data.to_gen_params()
                 )
-                for part, _, _ in new_generation:
+                for generation in new_generation:
                     if await request.is_disconnected():
                         break
 
                     response = create_chat_completion_stream_chunk(
-                        const_id, part, model_path.name
+                        const_id, generation, model_path.name
                     )
 
                     yield get_sse_packet(response.model_dump_json())
@@ -505,23 +608,45 @@ async def generate_chat_completion(request: Request, data: ChatCompletionRequest
             generate_with_semaphore(generator), media_type="text/event-stream"
         )
 
-    response_text, prompt_tokens, completion_tokens = await call_with_semaphore(
+    generation = await call_with_semaphore(
         partial(MODEL_CONTAINER.generate, prompt, **data.to_gen_params())
     )
-
-    response = create_chat_completion_response(
-        response_text, prompt_tokens, completion_tokens, model_path.name
-    )
+    response = create_chat_completion_response(generation, model_path.name)
 
     return response
 
 
-def entrypoint():
+def entrypoint(args: Optional[dict] = None):
     """Entry function for program startup"""
     global MODEL_CONTAINER
 
     # Load from YAML config
     read_config_from_file(pathlib.Path("config.yml"))
+
+    # Parse and override config from args
+    if args is None:
+        parser = init_argparser()
+        args = convert_args_to_dict(parser.parse_args(), parser)
+
+    override_config_from_args(args)
+
+    developer_config = get_developer_config()
+
+    # Check exllamav2 version and give a descriptive error if it's too old
+    # Skip if launching unsafely
+
+    if unwrap(developer_config.get("unsafe_launch"), False):
+        logger.warning(
+            "UNSAFE: Skipping ExllamaV2 version check.\n"
+            "If you aren't a developer, please keep this off!"
+        )
+    else:
+        check_exllama_version()
+
+    # Enable CUDA malloc backend
+    if unwrap(developer_config.get("cuda_malloc_backend"), False):
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "backend:cudaMallocAsync"
+        logger.warning("Enabled the experimental CUDA malloc backend.")
 
     network_config = get_network_config()
 
@@ -535,14 +660,26 @@ def entrypoint():
 
     gen_logging.broadcast_status()
 
+    # Set sampler parameter overrides if provided
+    sampling_config = get_sampling_config()
+    sampling_override_preset = sampling_config.get("override_preset")
+    if sampling_override_preset:
+        try:
+            set_overrides_from_file(sampling_override_preset)
+        except FileNotFoundError as e:
+            logger.warning(str(e))
+
     # If an initial model name is specified, create a container
     # and load the model
     model_config = get_model_config()
-    if "model_name" in model_config:
+    model_name = model_config.get("model_name")
+    if model_name:
         model_path = pathlib.Path(unwrap(model_config.get("model_dir"), "models"))
-        model_path = model_path / model_config.get("model_name")
+        model_path = model_path / model_name
 
-        MODEL_CONTAINER = ModelContainer(model_path.resolve(), False, **model_config)
+        MODEL_CONTAINER = ExllamaV2Container(
+            model_path.resolve(), False, **model_config
+        )
         load_status = MODEL_CONTAINER.load_gen(load_progress)
         for module, modules in load_status:
             if module == 0:
@@ -553,16 +690,24 @@ def entrypoint():
             else:
                 loading_bar.next()
 
-    # Load loras
-    lora_config = get_lora_config()
-    if "loras" in lora_config:
-        lora_dir = pathlib.Path(unwrap(lora_config.get("lora_dir"), "loras"))
-        MODEL_CONTAINER.load_loras(lora_dir.resolve(), **lora_config)
+        # Load loras after loading the model
+        lora_config = get_lora_config()
+        if lora_config.get("loras"):
+            lora_dir = pathlib.Path(unwrap(lora_config.get("lora_dir"), "loras"))
+            MODEL_CONTAINER.load_loras(lora_dir.resolve(), **lora_config)
+
+    host = unwrap(network_config.get("host"), "127.0.0.1")
+    port = unwrap(network_config.get("port"), 5000)
+
+    # TODO: Move OAI API to a separate folder
+    logger.info(f"Developer documentation: http://{host}:{port}/docs")
+    logger.info(f"Completions: http://{host}:{port}/v1/completions")
+    logger.info(f"Chat completions: http://{host}:{port}/v1/chat/completions")
 
     uvicorn.run(
         app,
-        host=network_config.get("host", "127.0.0.1"),
-        port=network_config.get("port", 5000),
+        host=host,
+        port=port,
         log_level="debug",
     )
 

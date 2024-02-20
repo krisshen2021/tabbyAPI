@@ -3,13 +3,12 @@ This method of authorization is pretty insecure, but since TabbyAPI is a local
 application, it should be fine.
 """
 import secrets
-from typing import Optional
-
+import yaml
 from fastapi import Header, HTTPException
 from pydantic import BaseModel
-import yaml
+from typing import Optional
 
-from logger import init_logger
+from common.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -60,7 +59,7 @@ def load_auth_keys(disable_from_config: bool):
         with open("api_tokens.yml", "r", encoding="utf8") as auth_file:
             auth_keys_dict = yaml.safe_load(auth_file)
             AUTH_KEYS = AuthKeys.model_validate(auth_keys_dict)
-    except OSError:
+    except FileNotFoundError:
         new_auth_keys = AuthKeys(
             api_key=secrets.token_hex(16), admin_key=secrets.token_hex(16)
         )

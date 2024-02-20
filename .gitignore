@@ -181,7 +181,7 @@ pyrightconfig.json
 
 # Models folder
 models/*
-!models/place_your_models_here.txt
+#!models/place_your_models_here.txt
 
 # Loras folder
 loras/*
@@ -192,3 +192,7 @@ loras/*
 #!templates/place_your_templates_here.txt
 #!templates/alpaca.jinja
 #!templates/chatml.jinja
+
+# Sampler overrides folder
+sampler_overrides/*
+!sampler_overrides/sample_preset.yml

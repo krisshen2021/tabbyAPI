@@ -1,8 +1,19 @@
-from uuid import uuid4
-from time import time
 from pydantic import BaseModel, Field
+from time import time
 from typing import Union, List, Optional, Dict
+from uuid import uuid4
+
 from OAI.types.common import UsageStats, CommonCompletionRequest
+
+
+class ChatCompletionLogprob(BaseModel):
+    token: str
+    logprob: float
+    top_logprobs: Optional[List["ChatCompletionLogprob"]] = None
+
+
+class ChatCompletionLogprobs(BaseModel):
+    content: List[ChatCompletionLogprob] = Field(default_factory=list)
 
 
 class ChatCompletionMessage(BaseModel):
@@ -15,6 +26,7 @@ class ChatCompletionRespChoice(BaseModel):
     index: int = 0
     finish_reason: str
     message: ChatCompletionMessage
+    logprobs: Optional[ChatCompletionLogprobs] = None
 
 
 class ChatCompletionStreamChoice(BaseModel):
@@ -22,6 +34,7 @@ class ChatCompletionStreamChoice(BaseModel):
     index: int = 0
     finish_reason: Optional[str]
     delta: Union[ChatCompletionMessage, dict] = {}
+    logprobs: Optional[ChatCompletionLogprobs] = None
 
 
 # Inherited from common request
