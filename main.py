@@ -8,7 +8,7 @@ from asyncio import CancelledError
 from typing import Optional
 from uuid import uuid4
 from jinja2 import TemplateError
-from fastapi import FastAPI, Depends, HTTPException, Request, Header
+from fastapi import FastAPI, Depends, HTTPException, Request, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from functools import partial
@@ -52,6 +52,7 @@ from OAI.types.model import (
     ModelLoadResponse,
     ModelCardParameters,
     SDPayload,
+    XTTSPayload,
 )
 from OAI.types.sampler_overrides import SamplerOverrideSwitchRequest
 from OAI.types.template import TemplateList, TemplateSwitchRequest
@@ -79,6 +80,28 @@ app = FastAPI(
         "like Postman or a frontend UI."
     ),
 )
+#XTTS tts to audio
+@app.post("/v1/xtts")
+async def xtts_to_audio(payload: XTTSPayload):
+    server_url = payload.server_url
+    payload_xtts = {
+        "text": payload.text,
+        "speaker_wav": payload.speaker_wav,
+        "language": payload.language
+    }
+    headers = {
+        'accept': 'audio/wav',
+        'Content-Type': 'application/json'
+    }
+    try:
+        response = requests.post(url=server_url, headers=headers, json=payload_xtts, stream=True)
+        
+        if response.status_code == 200:
+            return StreamingResponse(response.iter_content(1024), media_type="audio/wav", headers={"Content-Disposition": "attachment; filename=output.wav"})
+        else:
+            raise HTTPException(status_code=response.status_code, detail="TTS service error.")
+    except requests.RequestException as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 #SD Picture Generator
 @app.post("/v1/SDapi")

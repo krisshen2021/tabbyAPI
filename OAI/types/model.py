@@ -27,7 +27,12 @@ class SDPayload(BaseModel):
     steps: Optional[int] = None
     override_settings: Optional[OverrideSettings] = None
     override_settings_restore_afterwards: Optional[bool] = None
-
+    
+class XTTSPayload(BaseModel):
+    text: Optional[str] = None
+    speaker_wav: Optional[str] = "en_female_01"
+    language: Optional[str] = "en"
+    server_url: Optional[str] = "http://127.0.0.1:8020/tts_to_audio/"
 
 class ModelCardParameters(BaseModel):
     """Represents model card parameters."""
