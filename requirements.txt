@@ -21,9 +21,8 @@ uvicorn
 jinja2 >= 3.0.0
 colorlog
 pynvml
-requests
 tqdm
-
+httpx
 # Flash attention v2
 
 # Windows FA2 from https://github.com/bdashore3/flash-attention/releases

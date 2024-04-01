@@ -1,7 +1,9 @@
 """The main tabbyAPI module. Contains the FastAPI server and endpoints."""
-import requests
+import httpx
+from httpx import Timeout
 import pynvml
 import os
+from io import BytesIO
 import pathlib
 import uvicorn
 from asyncio import CancelledError
@@ -80,6 +82,7 @@ app = FastAPI(
         "like Postman or a frontend UI."
     ),
 )
+timeout=Timeout(180.0)
 #XTTS tts to audio
 @app.post("/v1/xtts")
 async def xtts_to_audio(payload: XTTSPayload):
@@ -94,22 +97,30 @@ async def xtts_to_audio(payload: XTTSPayload):
         'Content-Type': 'application/json'
     }
     try:
-        response = requests.post(url=server_url, headers=headers, json=payload_xtts, stream=True)
-        
-        if response.status_code == 200:
-            return StreamingResponse(response.iter_content(1024), media_type="audio/wav", headers={"Content-Disposition": "attachment; filename=output.wav"})
-        else:
-            raise HTTPException(status_code=response.status_code, detail="TTS service error.")
-    except requests.RequestException as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        async with httpx.AsyncClient() as client:
+            response = await client.post(server_url, json=payload_xtts, headers=headers, timeout=timeout)
+            if response.status_code == 200:
+                audio_data = BytesIO(response.content)
+                audio_data.seek(0)
+                return StreamingResponse(audio_data, media_type="audio/wav", headers={"Content-Disposition": "attachment; filename=output.wav"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 #SD Picture Generator
 @app.post("/v1/SDapi")
 async def SD_api_generate(payload: SDPayload, SD_URL: str = Header(None)):
     payload_dict = payload.model_dump()
     print(f'>>>Generate Image from {SD_URL}')
-    response = requests.post(url=SD_URL, json=payload_dict).json()
-    return response
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url=SD_URL, json=payload_dict, timeout=timeout)
+            response.raise_for_status() 
+            response_data = response.json()
+            return response_data
+    except httpx.HTTPStatusError as http_err:
+        print(f"HTTP error occurred: {http_err}")  # 输出 HTTP 错误
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 #SD model list
 @app.post("/v1/SDapiModelList")
@@ -118,8 +129,14 @@ async def SD_api_modellist(SD_URL: str = Header(None)):
     headers = {
             'accept': 'application/json'
         }
-    response = requests.get(url=SD_URL, headers=headers).json()
-    return response
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url=SD_URL, headers=headers, timeout=timeout)
+            response.raise_for_status() 
+            response_data = response.json()
+            return response_data
+    except Exception as e:
+        print("Error on fetch Model List from SDapi: ", e)
 
 # GPU list endpoint
 @app.get("/v1/gpu")

@@ -59,7 +59,7 @@ model:
   # An initial model to load. Make sure the model is located in the model directory!
   # A model can be loaded later via the API.
   # REQUIRED: This must be filled out to load a model on startup!
-  model_name: TheBloke_Silicon-Maid-7B-GPTQ
+  model_name: LoneStriker_Silicon-Maid-7B-8.0bpw-h8-exl2
 
   # Sends dummy model names when the models endpoint is queried
   # Enable this if the program is looking for a specific OAI model
@@ -78,7 +78,7 @@ model:
 
   # Automatically allocate resources to GPUs (default: True)
   # NOTE: Not parsed for single GPU users
-  gpu_split_auto: True
+  gpu_split_auto: False
 
   # Reserve VRAM used for autosplit loading (default: 96 MB on GPU 0)
   # This is represented as an array of MB per GPU used
@@ -128,7 +128,7 @@ model:
 
     # An initial draft model to load. Make sure this model is located in the model directory!
     # A draft model can be loaded later via the API.
-    #draft_model_name: TheBloke_Silicon-Maid-7B-GPTQ
+    #draft_model_name: LoneStriker_Silicon-Maid-7B-8.0bpw-h8-exl2
   
     # Rope scale for draft models (default: 1.0)
     # Same thing as compress_pos_emb
