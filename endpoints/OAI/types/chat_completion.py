@@ -3,7 +3,7 @@ from time import time
 from typing import Union, List, Optional, Dict
 from uuid import uuid4
 
-from OAI.types.common import UsageStats, CommonCompletionRequest
+from endpoints.OAI.types.common import UsageStats, CommonCompletionRequest
 
 
 class ChatCompletionLogprob(BaseModel):
@@ -24,7 +24,7 @@ class ChatCompletionMessage(BaseModel):
 class ChatCompletionRespChoice(BaseModel):
     # Index is 0 since we aren't using multiple choices
     index: int = 0
-    finish_reason: str
+    finish_reason: Optional[str] = None
     message: ChatCompletionMessage
     logprobs: Optional[ChatCompletionLogprobs] = None
 
@@ -32,7 +32,7 @@ class ChatCompletionRespChoice(BaseModel):
 class ChatCompletionStreamChoice(BaseModel):
     # Index is 0 since we aren't using multiple choices
     index: int = 0
-    finish_reason: Optional[str]
+    finish_reason: Optional[str] = None
     delta: Union[ChatCompletionMessage, dict] = {}
     logprobs: Optional[ChatCompletionLogprobs] = None
 
@@ -44,6 +44,7 @@ class ChatCompletionRequest(CommonCompletionRequest):
     messages: Union[str, List[Dict[str, str]]]
     prompt_template: Optional[str] = None
     add_generation_prompt: Optional[bool] = True
+    template_vars: Optional[dict] = {}
 
 
 class ChatCompletionResponse(BaseModel):

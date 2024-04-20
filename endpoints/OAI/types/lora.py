@@ -1,4 +1,5 @@
-""" Lora types """
+"""Lora types"""
+
 from pydantic import BaseModel, Field
 from time import time
 from typing import Optional, List
@@ -32,6 +33,7 @@ class LoraLoadRequest(BaseModel):
     """Represents a Lora load request."""
 
     loras: List[LoraLoadInfo]
+    skip_queue: bool = False
 
 
 class LoraLoadResponse(BaseModel):

@@ -1,10 +1,11 @@
-""" Completion API protocols """
+"""Completion API protocols"""
+
 from pydantic import BaseModel, Field
 from time import time
 from typing import Dict, List, Optional, Union
 from uuid import uuid4
 
-from OAI.types.common import CommonCompletionRequest, UsageStats
+from endpoints.OAI.types.common import CommonCompletionRequest, UsageStats
 
 
 class CompletionLogProbs(BaseModel):
@@ -21,7 +22,7 @@ class CompletionRespChoice(BaseModel):
 
     # Index is 0 since we aren't using multiple choices
     index: int = 0
-    finish_reason: str
+    finish_reason: Optional[str] = None
     logprobs: Optional[CompletionLogProbs] = None
     text: str
 

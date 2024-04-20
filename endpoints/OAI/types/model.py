@@ -1,38 +1,11 @@
-""" Contains model card types. """
+"""Contains model card types."""
+
 from pydantic import BaseModel, Field, ConfigDict
 from time import time
-from typing import List, Optional, Dict
+from typing import List, Optional
 
-from common.gen_logging import LogPreferences
+from common.gen_logging import GenLogPreferences
 
-class OverrideSettings(BaseModel):
-    sd_vae: Optional[str] = None
-    sd_model_checkpoint: Optional[str] = None
-
-class SDPayload(BaseModel):
-    hr_negative_prompt: Optional[str] = None
-    hr_prompt: str
-    hr_scale: Optional[float] = None
-    hr_second_pass_steps: Optional[int] = None
-    seed: Optional[int] = None
-    enable_hr: Optional[bool] = None
-    width: Optional[int] = None
-    height: Optional[int] = None
-    hr_upscaler: Optional[str] = None
-    negative_prompt: Optional[str] = None
-    prompt: str
-    sampler_name: Optional[str] = None
-    cfg_scale: Optional[float] = None
-    denoising_strength: Optional[float] = None
-    steps: Optional[int] = None
-    override_settings: Optional[OverrideSettings] = None
-    override_settings_restore_afterwards: Optional[bool] = None
-    
-class XTTSPayload(BaseModel):
-    text: Optional[str] = None
-    speaker_wav: Optional[str] = "en_female_01"
-    language: Optional[str] = "en"
-    server_url: Optional[str] = "http://127.0.0.1:8020/tts_to_audio/"
 
 class ModelCardParameters(BaseModel):
     """Represents model card parameters."""
@@ -43,9 +16,12 @@ class ModelCardParameters(BaseModel):
     rope_scale: Optional[float] = 1.0
     rope_alpha: Optional[float] = 1.0
     cache_mode: Optional[str] = "FP16"
+    chunk_size: Optional[int] = 2048
     prompt_template: Optional[str] = None
     num_experts_per_token: Optional[int] = None
     use_cfg: Optional[bool] = None
+
+    # Draft is another model, so include it in the card params
     draft: Optional["ModelCard"] = None
 
 
@@ -56,7 +32,7 @@ class ModelCard(BaseModel):
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time()))
     owned_by: str = "tabbyAPI"
-    logging: Optional[LogPreferences] = None
+    logging: Optional[GenLogPreferences] = None
     parameters: Optional[ModelCardParameters] = None
 
 
@@ -79,7 +55,6 @@ class DraftModelLoadRequest(BaseModel):
     )
 
 
-# TODO: Unify this with ModelCardParams
 class ModelLoadRequest(BaseModel):
     """Represents a model load request."""
 
@@ -116,11 +91,13 @@ class ModelLoadRequest(BaseModel):
     no_flash_attention: Optional[bool] = False
     # low_mem: Optional[bool] = False
     cache_mode: Optional[str] = "FP16"
+    chunk_size: Optional[int] = 2048
     prompt_template: Optional[str] = None
     num_experts_per_token: Optional[int] = None
     use_cfg: Optional[bool] = None
     fasttensors: Optional[bool] = False
     draft: Optional[DraftModelLoadRequest] = None
+    skip_queue: Optional[bool] = False
 
 
 class ModelLoadResponse(BaseModel):

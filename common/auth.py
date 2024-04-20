@@ -2,15 +2,13 @@
 This method of authorization is pretty insecure, but since TabbyAPI is a local
 application, it should be fine.
 """
+
 import secrets
 import yaml
 from fastapi import Header, HTTPException
 from pydantic import BaseModel
+from loguru import logger
 from typing import Optional
-
-from common.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 class AuthKeys(BaseModel):
@@ -35,6 +33,7 @@ class AuthKeys(BaseModel):
         return False
 
 
+# Global auth constants
 AUTH_KEYS: Optional[AuthKeys] = None
 DISABLE_AUTH: bool = False
 
@@ -76,7 +75,21 @@ def load_auth_keys(disable_from_config: bool):
     )
 
 
-def check_api_key(x_api_key: str = Header(None), authorization: str = Header(None)):
+async def validate_key_permission(test_key: str):
+    if test_key.lower().startswith("bearer"):
+        test_key = test_key.split(" ")[1]
+
+    if AUTH_KEYS.verify_key(test_key, "admin_key"):
+        return "admin"
+    elif AUTH_KEYS.verify_key(test_key, "api_key"):
+        return "api"
+    else:
+        raise ValueError("The provided authentication key is invalid.")
+
+
+async def check_api_key(
+    x_api_key: str = Header(None), authorization: str = Header(None)
+):
     """Check if the API key is valid."""
 
     # Allow request if auth is disabled
@@ -102,7 +115,9 @@ def check_api_key(x_api_key: str = Header(None), authorization: str = Header(Non
     raise HTTPException(401, "Please provide an API key")
 
 
-def check_admin_key(x_admin_key: str = Header(None), authorization: str = Header(None)):
+async def check_admin_key(
+    x_admin_key: str = Header(None), authorization: str = Header(None)
+):
     """Check if the admin key is valid."""
 
     # Allow request if auth is disabled

@@ -1,6 +1,6 @@
 import pathlib
 
-from OAI.types.lora import LoraCard, LoraList
+from endpoints.OAI.types.lora import LoraCard, LoraList
 
 
 def get_lora_list(lora_path: pathlib.Path):
@@ -9,6 +9,6 @@ def get_lora_list(lora_path: pathlib.Path):
     for path in lora_path.iterdir():
         if path.is_dir():
             lora_card = LoraCard(id=path.name)
-            lora_list.data.append(lora_card)  # pylint: disable=no-member
+            lora_list.data.append(lora_card)
 
     return lora_list

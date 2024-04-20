@@ -1,13 +1,17 @@
 """Small replication of AutoTokenizer's chat template system for efficiency"""
+
 import json
 import pathlib
 from functools import lru_cache
 from importlib.metadata import version as package_version
-from jinja2 import TemplateError
+from typing import Optional
+from jinja2 import Template, TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
+from loguru import logger
 from packaging import version
 from pydantic import BaseModel
-from typing import Optional, Dict
+
+from common.utils import unwrap
 
 
 class PromptTemplate(BaseModel):
@@ -17,12 +21,13 @@ class PromptTemplate(BaseModel):
     template: str
 
 
-def get_prompt_from_template(
-    messages,
-    prompt_template: PromptTemplate,
-    add_generation_prompt: bool,
-    special_tokens: Optional[Dict[str, str]] = None,
-):
+class TemplateLoadError(Exception):
+    """Raised on prompt template load"""
+
+    pass
+
+
+def get_prompt_from_template(prompt_template: PromptTemplate, template_vars: dict):
     """Get a prompt from a template and a list of messages."""
     if version.parse(package_version("jinja2")) < version.parse("3.0.0"):
         raise ImportError(
@@ -33,15 +38,15 @@ def get_prompt_from_template(
         )
 
     compiled_template = _compile_template(prompt_template.template)
-    return compiled_template.render(
-        messages=messages,
-        add_generation_prompt=add_generation_prompt,
-        **special_tokens,
-    )
+    rendered_template = compiled_template.render(**template_vars)
+    template_stop_strings = _get_template_stop_strings(compiled_template, template_vars)
+
+    return rendered_template, template_stop_strings
 
 
 # Inspired from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/tokenization_utils_base.py#L1761
+# TODO: Migrate to compile when template is loaded (removes the need for an lru_cache)
 @lru_cache
 def _compile_template(template: str):
     """Compiles a Jinja2 template"""
@@ -55,6 +60,25 @@ def _compile_template(template: str):
 
     jinja_template = jinja_env.from_string(template)
     return jinja_template
+
+
+# TODO: Migrate to run during template load
+def _get_template_stop_strings(prompt_template: Template, template_vars: dict):
+    """Appends extra stop strings if present in a chat template."""
+
+    extra_stop_strings = []
+    template_module = prompt_template.make_module(template_vars)
+
+    if hasattr(template_module, "stop_strings"):
+        if isinstance(template_module.stop_strings, list):
+            extra_stop_strings += template_module.stop_strings
+        else:
+            logger.warning(
+                "Skipping append of stopping strings from chat template "
+                "because stop_strings isn't a list."
+            )
+
+    return extra_stop_strings
 
 
 def get_all_templates():
@@ -76,7 +100,7 @@ def find_template_from_model(model_path: pathlib.Path):
         if template_name in model_name.lower():
             return template_name
         else:
-            raise LookupError("Could not find template from model name.")
+            raise TemplateLoadError("Could not find template from model name.")
 
 
 def get_template_from_file(prompt_template_name: str):
@@ -90,18 +114,50 @@ def get_template_from_file(prompt_template_name: str):
             )
     else:
         # Let the user know if the template file isn't found
-        raise FileNotFoundError(f'Template "{prompt_template_name}" not found.')
+        raise TemplateLoadError(
+            f'Chat template "{prompt_template_name}" not found in files.'
+        )
 
 
 # Get a template from a JSON file
 # Requires a key and template name
-def get_template_from_model_json(json_path: pathlib.Path, key: str, name: str):
+def get_template_from_model_json(
+    json_path: pathlib.Path, key: str, name: Optional[str] = None
+):
     """Get a template from a JSON file. Requires a key and template name"""
-    if json_path.exists():
-        with open(json_path, "r", encoding="utf8") as config_file:
-            model_config = json.load(config_file)
-            chat_template = model_config.get(key)
-            if chat_template:
-                return PromptTemplate(name=name, template=chat_template)
-    else:
-        raise FileNotFoundError(f'Model JSON path "{json_path}" not found.')
+    if not json_path.exists():
+        raise TemplateLoadError(f'Model JSON path "{json_path}" not found.')
+
+    with open(json_path, "r", encoding="utf8") as config_file:
+        model_config = json.load(config_file)
+        chat_template = model_config.get(key)
+
+        if not chat_template:
+            raise TemplateLoadError(
+                "Could not find a value from chat_template key in the passed JSON. "
+                "Check the tokenizer config?"
+            )
+
+        if isinstance(chat_template, list):
+            # Handles the new list style of chat templates
+            if name:
+                wrapped_template = next(
+                    (x for x in chat_template if x.get("name") == name),
+                    {},
+                )
+            else:
+                wrapped_template = chat_template[0]
+                name = unwrap(wrapped_template.get("name"), "from_tokenizer_config")
+
+            selected_template = wrapped_template.get("template")
+
+            if selected_template:
+                return PromptTemplate(name=name, template=selected_template)
+            else:
+                raise TemplateLoadError(
+                    f'Chat template with name "{name}" not found '
+                    "in model templates list."
+                )
+        else:
+            # Can safely assume the chat template is the old style
+            return PromptTemplate(name="from_tokenizer_config", template=chat_template)

@@ -1,15 +1,12 @@
 """Common functions for sampling parameters"""
 
 import pathlib
-from typing import Dict, List, Optional, Union
-from pydantic import AliasChoices, BaseModel, Field
 import yaml
+from loguru import logger
+from pydantic import AliasChoices, BaseModel, Field
+from typing import Dict, List, Optional, Union
 
-from common.logger import init_logger
 from common.utils import unwrap, prune_dict
-
-
-logger = init_logger(__name__)
 
 
 # Common class for sampler params
@@ -17,7 +14,7 @@ class BaseSamplerRequest(BaseModel):
     """Common class for sampler params that are used in APIs"""
 
     max_tokens: Optional[int] = Field(
-        default_factory=lambda: get_default_sampler_value("max_tokens", 150),
+        default_factory=lambda: get_default_sampler_value("max_tokens"),
         examples=[150],
     )
 
@@ -116,6 +113,18 @@ class BaseSamplerRequest(BaseModel):
 
     negative_prompt: Optional[str] = Field(
         default_factory=lambda: get_default_sampler_value("negative_prompt")
+    )
+
+    json_schema: Optional[object] = Field(
+        default_factory=lambda: get_default_sampler_value("json_schema"),
+    )
+
+    grammar_string: Optional[str] = Field(
+        default_factory=lambda: get_default_sampler_value("grammar_string"),
+    )
+
+    speculative_ngram: Optional[bool] = Field(
+        default_factory=lambda: get_default_sampler_value("speculative_ngram"),
     )
 
     # Aliased variables
@@ -261,38 +270,37 @@ class BaseSamplerRequest(BaseModel):
             "mirostat_eta": self.mirostat_eta,
             "cfg_scale": self.cfg_scale,
             "negative_prompt": self.negative_prompt,
+            "json_schema": self.json_schema,
+            "grammar_string": self.grammar_string,
+            "speculative_ngram": self.speculative_ngram,
         }
 
         return {**gen_params, **kwargs}
 
 
 # Global for default overrides
-DEFAULT_OVERRIDES = {}
+overrides = {}
 
 
-def get_sampler_overrides():
-    return DEFAULT_OVERRIDES
-
-
-def set_overrides_from_dict(new_overrides: dict):
+def overrides_from_dict(new_overrides: dict):
     """Wrapper function to update sampler overrides"""
 
-    global DEFAULT_OVERRIDES
+    global overrides
 
     if isinstance(new_overrides, dict):
-        DEFAULT_OVERRIDES = prune_dict(new_overrides)
+        overrides = prune_dict(new_overrides)
     else:
         raise TypeError("New sampler overrides must be a dict!")
 
 
-def set_overrides_from_file(preset_name: str):
+def overrides_from_file(preset_name: str):
     """Fetches an override preset from a file"""
 
     preset_path = pathlib.Path(f"sampler_overrides/{preset_name}.yml")
     if preset_path.exists():
         with open(preset_path, "r", encoding="utf8") as raw_preset:
             preset = yaml.safe_load(raw_preset)
-            set_overrides_from_dict(preset)
+            overrides_from_dict(preset)
 
             logger.info("Applied sampler overrides from file.")
     else:
@@ -309,14 +317,24 @@ def set_overrides_from_file(preset_name: str):
 def get_default_sampler_value(key, fallback=None):
     """Gets an overridden default sampler value"""
 
-    return unwrap(DEFAULT_OVERRIDES.get(key, {}).get("override"), fallback)
+    return unwrap(overrides.get(key, {}).get("override"), fallback)
 
 
 def apply_forced_sampler_overrides(params: BaseSamplerRequest):
     """Forcefully applies overrides if specified by the user"""
 
-    for var, value in DEFAULT_OVERRIDES.items():
+    for var, value in overrides.items():
         override = value.get("override")
-        force = unwrap(value.get("force"), False)
-        if force and override:
-            setattr(params, var, override)
+        original_value = getattr(params, var, None)
+
+        # Force takes precedence over additive
+        # Additive only works on lists and doesn't remove duplicates
+        if override:
+            if unwrap(value.get("force"), False):
+                setattr(params, var, override)
+            elif (
+                unwrap(value.get("additive"), False)
+                and isinstance(override, list)
+                and isinstance(original_value, list)
+            ):
+                setattr(params, var, override + original_value)

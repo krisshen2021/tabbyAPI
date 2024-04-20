@@ -1,30 +1,51 @@
 # Use an official CUDA runtime with Ubuntu as a parent image
-FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
-# Install Python and pip
-RUN apt-get update && apt-get install -y \
-    python3.11 \
-    python3-pip \
-    && rm -rf /var/lib/apt/lists/*
+ARG GIT_REPO=https://github.com/theroyallab/tabbyAPI
+ARG DO_PULL=true
+ENV DO_PULL $DO_PULL
 
 # Set the working directory in the container
-WORKDIR /usr/src/app
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    ca-certificates \
+    python3.11 \
+    python3-pip \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Update repo
+RUN if [ ${DO_PULL} ]; then \
+    git init && \
+    git remote add origin $GIT_REPO && \
+    git fetch origin && \
+    git pull origin main && \
+    echo "Pull finished"; fi
+
+# Upgrade pip
+RUN pip3 install --no-cache-dir --upgrade pip
 
 # Get requirements
-COPY requirements.txt requirements.txt
+COPY pyproject.toml .
 
-# Install torch with CUDA support and exllamav2
-RUN pip install torch --extra-index-url https://download.pytorch.org/whl/cu121
-RUN pip install exllamav2
+# Install packages specified in pyproject.toml cu121
+RUN pip3 install --no-cache-dir .[cu121]
 
-# Install any other needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the current directory contents into the container at /usr/src/app
+# Copy the current directory contents into the container
 COPY . .
+
+# Create a config.yml
+COPY config_sample.yml config.yml
 
 # Make port 5000 available to the world outside this container
 EXPOSE 5000
 
+# Set the entry point
+ENTRYPOINT ["python3"]
+
 # Run main.py when the container launches
-CMD ["python3", "main.py"]
+CMD ["main.py"]

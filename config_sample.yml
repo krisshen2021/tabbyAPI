@@ -73,7 +73,8 @@ model:
 
   # Overrides base model context length (default: Empty)
   # WARNING: Don't set this unless you know what you're doing!
-  # Only use this if the model's base sequence length in config.json is incorrect (ex. Mistral/Mixtral models)
+  # Again, do NOT use this for configuring context length, use max_seq_len above ^
+  # Only use this if the model's base sequence length in config.json is incorrect (ex. Mistral 7B)
   #override_base_seq_len:
 
   # Automatically allocate resources to GPUs (default: True)
@@ -102,10 +103,17 @@ model:
   # Disable Flash-attention 2. Set to True for GPUs lower than Nvidia's 3000 series. (default: False)
   #no_flash_attention: False
 
-  # Enable 8 bit cache mode for VRAM savings (slight performance hit). Possible values FP16, FP8. (default: FP16)
+  # Enable different cache modes for VRAM savings (slight performance hit).
+  # Possible values FP16, FP8, Q4. (default: FP16)
   #cache_mode: FP16
 
-  # Set the prompt template for this model. If empty, chat completions will be disabled. (default: Empty)
+  # Chunk size for prompt ingestion. A lower value reduces VRAM usage at the cost of ingestion speed (default: 2048)
+  # NOTE: Effects vary depending on the model. An ideal value is between 512 and 4096
+  #chunk_size: 2048
+
+  # Set the prompt template for this model. If empty, attempts to look for the model's chat template. (default: None)
+  # If a model contains multiple templates in its tokenizer_config.json, set prompt_template to the name
+  # of the template you want to use.
   # NOTE: Only works with chat completion message lists!
   #prompt_template:
 

@@ -1,8 +1,10 @@
 """The model container class for ExLlamaV2 models."""
+
 import gc
-from itertools import zip_longest
 import pathlib
+import threading
 import time
+import traceback
 
 import torch
 from exllamav2 import (
@@ -10,23 +12,32 @@ from exllamav2 import (
     ExLlamaV2Config,
     ExLlamaV2Cache,
     ExLlamaV2Cache_8bit,
+    ExLlamaV2Cache_Q4,
     ExLlamaV2Tokenizer,
     ExLlamaV2Lora,
 )
 from exllamav2.generator import ExLlamaV2StreamingGenerator, ExLlamaV2Sampler
+from itertools import zip_longest
+from loguru import logger
 from typing import List, Optional, Union
 
-from common.gen_logging import log_generation_params, log_prompt, log_response
+from backends.exllamav2.grammar import ExLlamaV2Grammar
+from common.concurrency import iterate_in_threadpool
+from common.gen_logging import (
+    log_generation_params,
+    log_metrics,
+    log_prompt,
+    log_response,
+)
 from common.templating import (
     PromptTemplate,
+    TemplateLoadError,
     find_template_from_model,
     get_template_from_model_json,
     get_template_from_file,
 )
+from common.transformers_utils import GenerationConfig
 from common.utils import coalesce, unwrap
-from common.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 class ExllamaV2Container:
@@ -45,13 +56,18 @@ class ExllamaV2Container:
     active_loras: List[ExLlamaV2Lora] = []
 
     # Internal config vars
-    cache_fp8: bool = False
+    cache_mode: str = "FP16"
     use_cfg: bool = False
+    generation_config: Optional[GenerationConfig] = None
 
     # GPU split vars
     gpu_split: Optional[list] = None
     gpu_split_auto: bool = True
     autosplit_reserve: List[float] = [96 * 1024**2]
+
+    # Load state
+    model_is_loading: bool = False
+    model_loaded: bool = False
 
     def __init__(self, model_directory: pathlib.Path, quiet=False, **kwargs):
         """
@@ -103,8 +119,7 @@ class ExllamaV2Container:
         """
 
         self.quiet = quiet
-
-        self.cache_fp8 = "cache_mode" in kwargs and kwargs["cache_mode"] == "FP8"
+        self.cache_mode = unwrap(kwargs.get("cache_mode"), "FP16")
 
         # Turn off GPU split if the user is using 1 GPU
         gpu_count = torch.cuda.device_count()
@@ -131,8 +146,12 @@ class ExllamaV2Container:
         self.config.model_dir = str(model_directory.resolve())
 
         # Make the max seq len 4096 before preparing the config
-        # This is a better default than 2038
+        # This is a better default than 2048
         self.config.max_seq_len = 4096
+
+        # Hardcode max output length to 16
+        self.config.max_output_len = 16
+
         self.config.prepare()
 
         # Then override the base_seq_len if present
@@ -171,22 +190,30 @@ class ExllamaV2Container:
             True if self.use_cfg else unwrap(kwargs.get("no_flash_attention"), False)
         )
 
-        # low_mem is currently broken in exllamav2. Don't use it until it's
-        # fixed.
-        """
-        if "low_mem" in kwargs and kwargs["low_mem"]:
-            self.config.set_low_mem()
-        """
-
         # Try to set prompt template
         self.prompt_template = self.find_prompt_template(
             kwargs.get("prompt_template"), model_directory
         )
 
+        # Load generation config overrides
+        generation_config_path = (
+            pathlib.Path(self.config.model_dir) / "generation_config.json"
+        )
+        if generation_config_path.exists():
+            try:
+                self.generation_config = GenerationConfig.from_file(
+                    generation_config_path.parent
+                )
+            except Exception:
+                logger.error(traceback.format_exc())
+                logger.warning(
+                    "Skipping generation config load because of an unexpected error."
+                )
+
         # Catch all for template lookup errors
         if self.prompt_template:
             logger.info(
-                f"Using template {self.prompt_template.name} " "for chat completions."
+                f'Using template "{self.prompt_template.name}" for chat completions.'
             )
         else:
             logger.warning(
@@ -199,11 +226,11 @@ class ExllamaV2Container:
         if num_experts_override:
             self.config.num_experts_per_token = kwargs.get("num_experts_per_token")
 
-        chunk_size = min(
-            unwrap(kwargs.get("chunk_size"), 2048), self.config.max_seq_len
-        )
+        # Make sure chunk size is >= 16 and <= max seq length
+        user_chunk_size = unwrap(kwargs.get("chunk_size"), 2048)
+        chunk_size = sorted((16, user_chunk_size, self.config.max_seq_len))[1]
         self.config.max_input_len = chunk_size
-        self.config.max_attn_size = chunk_size**2
+        self.config.max_attention_size = chunk_size**2
 
         draft_args = unwrap(kwargs.get("draft"), {})
         draft_model_name = draft_args.get("draft_model_name")
@@ -238,9 +265,9 @@ class ExllamaV2Container:
             )
             self.draft_config.max_seq_len = self.config.max_seq_len
 
-            if "chunk_size" in kwargs:
-                self.draft_config.max_input_len = kwargs["chunk_size"]
-                self.draft_config.max_attn_size = kwargs["chunk_size"] ** 2
+            if chunk_size:
+                self.draft_config.max_input_len = chunk_size
+                self.draft_config.max_attention_size = chunk_size**2
 
     def find_prompt_template(self, prompt_template_name, model_directory):
         """Tries to find a prompt template using various methods"""
@@ -251,23 +278,36 @@ class ExllamaV2Container:
             lambda: get_template_from_model_json(
                 pathlib.Path(self.config.model_dir) / "tokenizer_config.json",
                 "chat_template",
-                "from_tokenizer_config",
             ),
             lambda: get_template_from_file(find_template_from_model(model_directory)),
         ]
 
         # Add lookup from prompt template name if provided
         if prompt_template_name:
-            find_template_functions.insert(
-                0, lambda: get_template_from_file(prompt_template_name)
-            )
+            find_template_functions[:0] = [
+                lambda: get_template_from_file(prompt_template_name),
+                lambda: get_template_from_model_json(
+                    pathlib.Path(self.config.model_dir) / "tokenizer_config.json",
+                    "chat_template",
+                    prompt_template_name,
+                ),
+            ]
 
-        for func in find_template_functions:
+        # Continue on exception since functions are tried as they fail
+        for template_func in find_template_functions:
             try:
-                prompt_template = func()
+                prompt_template = template_func()
                 if prompt_template is not None:
                     return prompt_template
-            except (FileNotFoundError, LookupError):
+            except TemplateLoadError as e:
+                logger.warning(f"TemplateLoadError: {str(e)}")
+                continue
+            except Exception:
+                logger.error(traceback.format_exc())
+                logger.warning(
+                    "An unexpected error happened when trying to load the template. "
+                    "Trying other methods."
+                )
                 continue
 
     def calculate_rope_alpha(self, base_seq_len):
@@ -290,7 +330,34 @@ class ExllamaV2Container:
         )
         return model_path
 
-    def load(self, progress_callback=None):
+    def get_model_parameters(self):
+        model_params = {
+            "name": self.get_model_path().name,
+            "rope_scale": self.config.scale_pos_emb,
+            "rope_alpha": self.config.scale_alpha_value,
+            "max_seq_len": self.config.max_seq_len,
+            "cache_mode": self.cache_mode,
+            "chunk_size": self.config.max_input_len,
+            "num_experts_per_token": self.config.num_experts_per_token,
+            "use_cfg": self.use_cfg,
+            "prompt_template": self.prompt_template.name
+            if self.prompt_template
+            else None,
+        }
+
+        if self.draft_config:
+            draft_model_params = {
+                "name": self.get_model_path(is_draft=True).name,
+                "rope_scale": self.draft_config.scale_pos_emb,
+                "rope_alpha": self.draft_config.scale_alpha_value,
+                "max_seq_len": self.draft_config.max_seq_len,
+            }
+
+            model_params["draft"] = draft_model_params
+
+        return model_params
+
+    async def load(self, progress_callback=None):
         """
         Load model
 
@@ -300,10 +367,10 @@ class ExllamaV2Container:
                 def progress(loaded_modules: int, total_modules: int)
         """
 
-        for _ in self.load_gen(progress_callback):
+        async for _ in self.load_gen(progress_callback):
             pass
 
-    def load_loras(self, lora_directory: pathlib.Path, **kwargs):
+    async def load_loras(self, lora_directory: pathlib.Path, **kwargs):
         """
         Load loras
         """
@@ -326,7 +393,7 @@ class ExllamaV2Container:
 
             logger.info(f"Loading lora: {lora_name} at scaling {lora_scaling}")
             lora_path = lora_directory / lora_name
-            # FIXME(alpin): Does self.model need to be passed here?
+
             self.active_loras.append(
                 ExLlamaV2Lora.from_directory(self.model, lora_path, lora_scaling)
             )
@@ -336,7 +403,15 @@ class ExllamaV2Container:
         # Return success and failure names
         return {"success": success, "failure": failure}
 
-    def load_gen(self, progress_callback=None):
+    async def load_gen(self, progress_callback=None):
+        """Basic async wrapper around the loading generator"""
+
+        load_generator = self.load_gen_sync(progress_callback)
+        async for value in iterate_in_threadpool(load_generator):
+            yield value
+
+    @torch.inference_mode()
+    def load_gen_sync(self, progress_callback=None):
         """
         Load model, generator function
 
@@ -344,9 +419,19 @@ class ExllamaV2Container:
             progress_callback (function, optional): A function to call for each
                 module loaded. Prototype:
                 def progress(loaded_modules: int, total_modules: int)
+
+        Runs under a shared inference mode context.
         """
 
-        # Load tokenizer
+        # Notify that the model is being loaded
+        self.model_is_loading = True
+
+        # Reset tokenizer namespace vars and create a tokenizer
+        ExLlamaV2Tokenizer.unspecial_piece_to_id = {}
+        ExLlamaV2Tokenizer.unspecial_id_to_piece = {}
+        ExLlamaV2Tokenizer.extended_id_to_piece = {}
+        ExLlamaV2Tokenizer.extended_piece_to_id = {}
+
         self.tokenizer = ExLlamaV2Tokenizer(self.config)
 
         # Calculate autosplit reserve for all GPUs
@@ -362,12 +447,14 @@ class ExllamaV2Container:
                 logger.info("Loading draft model: " + self.draft_config.model_dir)
 
             self.draft_cache = ExLlamaV2Cache(self.draft_model, lazy=True)
-            yield from self.draft_model.load_autosplit_gen(
+            for value in self.draft_model.load_autosplit_gen(
                 self.draft_cache,
                 reserve_vram=autosplit_reserve,
                 last_id_only=True,
                 callback_gen=progress_callback,
-            )
+            ):
+                if value:
+                    yield value
 
             # Test VRAM allocation with a full-length forward pass
             input_ids = torch.zeros((1, self.config.max_input_len), dtype=torch.long)
@@ -390,7 +477,12 @@ class ExllamaV2Container:
                     yield value
 
         batch_size = 2 if self.use_cfg else 1
-        if self.cache_fp8:
+
+        if self.cache_mode == "Q4":
+            self.cache = ExLlamaV2Cache_Q4(
+                self.model, lazy=self.gpu_split_auto, batch_size=batch_size
+            )
+        elif self.cache_mode == "FP8":
             self.cache = ExLlamaV2Cache_8bit(
                 self.model, lazy=self.gpu_split_auto, batch_size=batch_size
             )
@@ -425,15 +517,14 @@ class ExllamaV2Container:
             self.draft_cache,
         )
 
-        # Always return logprobs and logits
-        self.generator.return_probabilities = True
-        self.generator.return_logits = True
-
         # Clean up any extra vram usage from torch and cuda
         # (Helps reduce VRAM bottlenecking on Windows)
         gc.collect()
         torch.cuda.empty_cache()
 
+        # Update model load state
+        self.model_is_loading = False
+        self.model_loaded = True
         logger.info("Model successfully loaded.")
 
     def unload(self, loras_only: bool = False):
@@ -461,8 +552,14 @@ class ExllamaV2Container:
             self.tokenizer = None
             self.generator = None
 
+            # Set all model state variables to False
+            self.model_is_loading = False
+            self.model_loaded = False
+
         gc.collect()
         torch.cuda.empty_cache()
+
+        logger.info("Loras unloaded." if loras_only else "Model unloaded.")
 
     def encode_tokens(self, text: str, **kwargs):
         """Wrapper to encode tokens from a text string"""
@@ -486,7 +583,10 @@ class ExllamaV2Container:
             decode_special_tokens=unwrap(kwargs.get("decode_special_tokens"), True),
         )[0]
 
-    def get_special_tokens(self, add_bos_token: bool, ban_eos_token: bool):
+    # TODO: Maybe support generation_config for eos_token
+    def get_special_tokens(
+        self, add_bos_token: bool = True, ban_eos_token: bool = False
+    ):
         return {
             "bos_token": self.tokenizer.bos_token if add_bos_token else "",
             "eos_token": self.tokenizer.eos_token if not ban_eos_token else "",
@@ -513,9 +613,11 @@ class ExllamaV2Container:
 
         return dict(zip_longest(top_tokens, cleaned_values))
 
-    def generate(self, prompt: str, **kwargs):
+    async def generate(self, prompt: str, **kwargs):
         """Generate a response to a prompt"""
-        generations = list(self.generate_gen(prompt, **kwargs))
+        generations = []
+        async for generation in self.generate_gen(prompt, **kwargs):
+            generations.append(generation)
 
         joined_generation = {
             "text": "",
@@ -527,9 +629,19 @@ class ExllamaV2Container:
         }
 
         if generations:
+            # Get finish_reason first and then shift where -1 points to
+            if "finish_reason" in generations[-1]:
+                finish_reason_gen = generations.pop()
+                joined_generation["finish_reason"] = finish_reason_gen.get(
+                    "finish_reason"
+                )
+            else:
+                joined_generation["finish_reason"] = "stop"
+
+        if len(generations) > 0:
             for generation in generations:
                 joined_generation["text"] += unwrap(generation.get("text"), "")
-                joined_generation["offset"].append(unwrap(generation.get("offset"), []))
+                joined_generation["offset"].append(unwrap(generation.get("offset"), -1))
                 joined_generation["token_probs"].update(
                     unwrap(generation.get("token_probs"), {})
                 )
@@ -551,55 +663,38 @@ class ExllamaV2Container:
     def check_unsupported_settings(self, **kwargs):
         """Check and warn the user if a sampler is unsupported. Meant for dev wheels!"""
 
-        pass
+        if unwrap(kwargs.get("speculative_ngram"), False) and not hasattr(
+            ExLlamaV2StreamingGenerator, "speculative_ngram"
+        ):
+            logger.warning(
+                "Speculative ngram is not supported by the currently "
+                "installed ExLlamaV2 version."
+            )
 
-    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
-    def generate_gen(self, prompt: str, **kwargs):
+            kwargs.pop("speculative_ngram")
+
+        return kwargs
+
+    async def generate_gen(
+        self, prompt: str, abort_event: Optional[threading.Event] = None, **kwargs
+    ):
+        """Basic async wrapper for completion generator"""
+
+        sync_generator = self.generate_gen_sync(prompt, abort_event, **kwargs)
+        async for value in iterate_in_threadpool(sync_generator):
+            yield value
+
+    @torch.inference_mode()
+    def generate_gen_sync(
+        self, prompt: str, abort_event: Optional[threading.Event] = None, **kwargs
+    ):
         """
-        Create generator function for prompt completion
+        Create generator function for prompt completion.
 
-        Args:
-            prompt (str): Input prompt
-            **kwargs:
-                'token_healing' (bool): Use token healing (default: False)
-                'temperature' (float): Sampling temperature (default: 1.0)
-                'temperature_last' (bool): Apply temperature after all other
-                    samplers (default: False)
-                'top_k' (int): Sampling top-K (default: 0)
-                'top_p' (float): Sampling top-P (default: 1.0)
-                'min_p' (float): Sampling min-P (default: 0.0)
-                'tfs' (float): Tail-free sampling (default: 0.0)
-                'typical' (float): Sampling typical (default: 0.0)
-                'mirostat' (bool): Use Mirostat (default: False)
-                'mirostat_tau' (float) Mirostat tau parameter (default: 1.5)
-                'mirostat_eta' (float) Mirostat eta parameter (default: 0.1)
-                'frequency_penalty' (float): Token frequency penalty (default: 0.0)
-                'presence_penalty' (float): Token presence penalty (default: 0.0)
-                'repetition_penalty' (float): Token repetition penalty
-                    (default: 1.15)
-                'penalty_range' (int): Penalty range
-                    (default: whole context)
-                'repetition_decay' (int): Repetition penalty range
-                    (default: same as range)
-                'stop' (List[Union[str, int]]): List of stop strings/tokens to
-                    end response (default: [EOS])
-                'max_tokens' (int): Max no. tokens in response (default: 150)
-                'add_bos_token' (bool): Adds the BOS token to the start of the
-                    prompt (default: True)
-                'ban_eos_token' (bool): Bans the EOS token from generation
-                    (default: False)
-                'logit_bias' (Dict[int, float]): Biases specific tokens to
-                    either show up more or less (default: None)
-                'stream_interval' (float): Interval in seconds between each
-                    output chunk (default: immediate)
-                'generate_window' (int): Space to reserve at the end of the
-                    model's context when generating. Rolls context window by
-                    the same amount if context length is exceeded to allow
-                    generating pastthe models max_seq_len.
+        for kwargs, check common/sampling.py
         """
 
         token_healing = unwrap(kwargs.get("token_healing"), False)
-        max_tokens = unwrap(kwargs.get("max_tokens"), 150)
         stream_interval = unwrap(kwargs.get("stream_interval"), 0)
         generate_window = max(
             unwrap(kwargs.get("generate_window"), 512), self.config.max_seq_len // 8
@@ -609,7 +704,7 @@ class ExllamaV2Container:
         gen_settings = ExLlamaV2Sampler.Settings()
 
         # Check unsupported settings for dev wheels
-        self.check_unsupported_settings(**kwargs)
+        kwargs = self.check_unsupported_settings(**kwargs)
 
         # Apply settings
         gen_settings.temperature = unwrap(kwargs.get("temperature"), 1.0)
@@ -662,7 +757,7 @@ class ExllamaV2Container:
                     kwargs.get("negative_prompt"), self.tokenizer.bos_token
                 )
             else:
-                logger.warn(
+                logger.warning(
                     "CFG is currently disabled. "
                     "Please reload your model with use_cfg = True.",
                 )
@@ -709,7 +804,11 @@ class ExllamaV2Container:
 
         # Logprobs
         request_logprobs = unwrap(kwargs.get("logprobs"), 0)
-        self.generator.return_top_tokens = request_logprobs
+
+        # Speculative Ngram
+        self.generator.speculative_ngram = unwrap(
+            kwargs.get("speculative_ngram"), False
+        )
 
         # Override sampler settings for temp = 0
         if gen_settings.temperature == 0:
@@ -718,23 +817,8 @@ class ExllamaV2Container:
             gen_settings.top_p = 0
             gen_settings.typical = 0
 
-        # Log generation options to console
-        # Some options are too large, so log the args instead
-        log_generation_params(
-            max_tokens=max_tokens,
-            **vars(gen_settings),
-            token_healing=token_healing,
-            auto_scale_penalty_range=auto_scale_penalty_range,
-            generate_window=generate_window,
-            add_bos_token=add_bos_token,
-            ban_eos_token=ban_eos_token,
-            logprobs=request_logprobs,
-            stop_conditions=stop_conditions,
-            logit_bias=logit_bias,
-        )
-
-        # Log prompt to console
-        log_prompt(prompt, negative_prompt)
+        # Store the gen settings for logging purposes
+        gen_settings_log_dict = vars(gen_settings)
 
         # Set logit bias
         if logit_bias:
@@ -747,22 +831,47 @@ class ExllamaV2Container:
                 )
 
             # Map logits to the tensor with their biases
-            for token, bias in logit_bias.items():
-                if token in gen_settings.token_bias:
-                    gen_settings.token_bias[token] = bias
+            for token_id, bias in logit_bias.items():
+                if 0 <= token_id < len(self.tokenizer.id_to_piece):
+                    gen_settings.token_bias[token_id] = bias
                 else:
                     logger.warning(
-                        f"Logit bias: Token {token} not present "
+                        f"Logit bias: Token {token_id} not present "
                         "in the model's vocab. Skipping."
                     )
+
+        # Initialize grammar handler
+        grammar_handler = ExLlamaV2Grammar()
+        gen_settings.filters = []
+
+        # Add JSON schema filter if it exists
+        json_schema = unwrap(kwargs.get("json_schema"))
+        if json_schema:
+            grammar_handler.add_json_schema_filter(
+                json_schema, gen_settings, self.model, self.tokenizer
+            )
+
+        # Add EBNF filter if it exists
+        grammar_string = unwrap(kwargs.get("grammar_string"))
+        if grammar_string:
+            grammar_handler.add_ebnf_filter(
+                grammar_string, gen_settings, self.model, self.tokenizer
+            )
+
+        # Fetch EOS tokens from generation_config if they exist
+        eos_tokens = (
+            self.generation_config.eos_tokens()
+            if self.generation_config
+            else [self.tokenizer.eos_token_id]
+        )
 
         # Ban the EOS token if specified. If not, append to stop conditions
         # as well.
         # Set this below logging to avoid polluting the stop strings array
         if ban_eos_token:
-            gen_settings.disallow_tokens(self.tokenizer, [self.tokenizer.eos_token_id])
+            gen_settings.disallow_tokens(self.tokenizer, eos_tokens)
         else:
-            stop_conditions.append(self.tokenizer.eos_token_id)
+            stop_conditions += eos_tokens
 
         # Stop conditions
         self.generator.set_stop_conditions(stop_conditions)
@@ -792,6 +901,34 @@ class ExllamaV2Container:
 
         prompt_tokens = ids.shape[-1]
 
+        # Automatically set max_tokens to fill up the context
+        # This should be an OK default, but may be changed in the future
+        max_tokens = unwrap(
+            kwargs.get("max_tokens"), self.config.max_seq_len - prompt_tokens
+        )
+
+        # Log generation options to console
+        # Some options are too large, so log the args instead
+        log_generation_params(
+            max_tokens=max_tokens,
+            stream=kwargs.get("stream"),
+            **gen_settings_log_dict,
+            token_healing=token_healing,
+            auto_scale_penalty_range=auto_scale_penalty_range,
+            generate_window=generate_window,
+            bos_token_id=self.tokenizer.bos_token_id,
+            eos_token_id=eos_tokens,
+            add_bos_token=add_bos_token,
+            ban_eos_token=ban_eos_token,
+            speculative_ngram=self.generator.speculative_ngram,
+            logprobs=request_logprobs,
+            stop_conditions=stop_conditions,
+            logit_bias=logit_bias,
+        )
+
+        # Log prompt to console
+        log_prompt(prompt, negative_prompt)
+
         # Begin
         generated_tokens = 0
         full_response = ""
@@ -813,20 +950,28 @@ class ExllamaV2Container:
 
                 # Split for exllama versions that have CFG
                 if self.use_cfg:
-                    self.generator.begin_stream(
+                    self.generator.begin_stream_ex(
                         active_ids,
                         gen_settings,
                         token_healing=token_healing,
                         loras=self.active_loras,
                         input_mask=mask,
                         position_offsets=offsets,
+                        return_probabilities=request_logprobs > 0,
+                        return_top_tokens=request_logprobs,
+                        return_logits=request_logprobs > 0,
+                        abort_event=abort_event,
                     )
                 else:
-                    self.generator.begin_stream(
+                    self.generator.begin_stream_ex(
                         active_ids,
                         gen_settings,
                         token_healing=token_healing,
                         loras=self.active_loras,
+                        return_probabilities=request_logprobs > 0,
+                        return_top_tokens=request_logprobs,
+                        return_logits=request_logprobs > 0,
+                        abort_event=abort_event,
                     )
 
                 # Reset offsets for subsequent passes if the context is truncated
@@ -899,40 +1044,19 @@ class ExllamaV2Container:
                 last_chunk_time = now
 
             if eos or generated_tokens == max_tokens:
+                # Print response
+                log_response(full_response)
+
+                # Print metrics
+                elapsed_time = last_chunk_time - start_time
+                context_len = None if ids is None else context_len
+
+                log_metrics(
+                    generated_tokens, elapsed_time, context_len, self.config.max_seq_len
+                )
+
+                finish_reason = "length" if generated_tokens == max_tokens else "stop"
+                generation = {"finish_reason": finish_reason}
+                yield generation
+
                 break
-
-        # Print response
-        log_response(full_response)
-
-        elapsed_time = last_chunk_time - start_time
-
-        initial_response = (
-            f"Metrics: {generated_tokens} tokens generated in "
-            f"{round(elapsed_time, 2)} seconds"
-        )
-        itemization = []
-        extra_parts = []
-
-        # Add tokens per second
-        tokens_per_second = (
-            "Indeterminate"
-            if elapsed_time == 0
-            else round(generated_tokens / elapsed_time, 2)
-        )
-        itemization.append(f"{tokens_per_second} T/s")
-
-        # Add context (original token count)
-        if ids is not None:
-            itemization.append(f"context {context_len} tokens")
-
-        if context_len > self.config.max_seq_len:
-            extra_parts.append("<-- Not accurate (truncated)")
-
-        # Print output
-        logger.info(
-            initial_response
-            + " ("
-            + ", ".join(itemization)
-            + ") "
-            + " ".join(extra_parts)
-        )
