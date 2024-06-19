@@ -196,3 +196,5 @@ loras/*
 # Sampler overrides folder
 sampler_overrides/*
 !sampler_overrides/sample_preset.yml
+/models/
+models

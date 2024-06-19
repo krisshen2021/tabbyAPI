@@ -1,11 +1,15 @@
-import httpx
+import httpx,pynvml,asyncio
 from httpx import Timeout
-import pynvml
 from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
+from mistralai.models.chat_completion import ChatMessage
+from remote_api_hub import (
+    cohere_stream,CohereParam,
+    mistral_stream, MistralParam,
+    )
 
 timeout=Timeout(180.0)
 
@@ -37,6 +41,8 @@ class XTTSPayload(BaseModel):
     speaker_wav: Optional[str] = "en_female_01"
     language: Optional[str] = "en"
     server_url: Optional[str] = "http://127.0.0.1:8020/tts_to_audio/"
+
+
     
     
 router = APIRouter(
@@ -119,3 +125,20 @@ async def get_gpu_info():
     pynvml.nvmlShutdown()
     return {"GPU Count": device_count, "GPU Info": gpu_info}
 
+# remote api endpoint
+@router.post("/v1/remoteapi/{ai_type}")
+async def remote_ai_stream(ai_type:str, params_json:dict):
+    if ai_type == "cohere":
+        keys_to_keep = ["message","temperature","max_tokens","presence_penalty","model","raw_prompting"]
+        cohere_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
+        params = CohereParam(**cohere_dict)
+        return StreamingResponse(cohere_stream(params), media_type="text/plain")
+    elif ai_type == "mistral":
+        keys_to_keep = ["message","temperature","max_tokens","top_p","model"]
+        mistral_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
+        mistral_dict["message"] = [ChatMessage(role="user", content=mistral_dict["message"])]
+        mistral_dict["messages"] = mistral_dict.pop("message")
+        params = MistralParam(**mistral_dict)
+        return StreamingResponse(mistral_stream(params), media_type="text/plain") 
+    else:
+        return "Invalid AI type"

@@ -1,2 +1,5 @@
 httpx
 pynvml
+openai
+mistralai
+cohere
