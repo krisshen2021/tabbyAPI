@@ -9,6 +9,7 @@ from mistralai.models.chat_completion import ChatMessage
 from remote_api_hub import (
     cohere_stream,CohereParam,
     mistral_stream, MistralParam,
+    deepseek_stream, DeepseekParam
     )
 
 timeout=Timeout(180.0)
@@ -139,6 +140,14 @@ async def remote_ai_stream(ai_type:str, params_json:dict):
         mistral_dict["message"] = [ChatMessage(role="user", content=mistral_dict["message"])]
         mistral_dict["messages"] = mistral_dict.pop("message")
         params = MistralParam(**mistral_dict)
-        return StreamingResponse(mistral_stream(params), media_type="text/plain") 
+        return StreamingResponse(mistral_stream(params), media_type="text/plain")
+    elif ai_type == "deepseek":
+        keys_to_keep = ["message","temperature","max_tokens","top_p","model","presence_penalty"]
+        deepseek_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
+        deepseek_dict["message"] = [ChatMessage(role="user", content=deepseek_dict["message"])]
+        deepseek_dict["messages"] = deepseek_dict.pop("message")
+        params = DeepseekParam(**deepseek_dict)
+        return StreamingResponse(deepseek_stream(params), media_type="text/plain")
+        
     else:
         return "Invalid AI type"
