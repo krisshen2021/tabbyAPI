@@ -9,7 +9,10 @@ from mistralai.models.chat_completion import ChatMessage
 from remote_api_hub import (
     cohere_stream,CohereParam,
     mistral_stream, MistralParam,
-    deepseek_stream, DeepseekParam
+    deepseek_stream, DeepseekParam,
+    togetherAi_stream, TogetherAiParam,
+    yiAi_stream,YiParam,
+    nvidia_stream, NvidiaParam
     )
 
 timeout=Timeout(180.0)
@@ -130,24 +133,40 @@ async def get_gpu_info():
 @router.post("/v1/remoteapi/{ai_type}")
 async def remote_ai_stream(ai_type:str, params_json:dict):
     if ai_type == "cohere":
-        keys_to_keep = ["message","temperature","max_tokens","presence_penalty","model","raw_prompting"]
+        keys_to_keep = ["messages","temperature","max_tokens","presence_penalty","model","raw_prompting"]
         cohere_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
+        cohere_dict["message"] = cohere_dict.pop("messages")
         params = CohereParam(**cohere_dict)
         return StreamingResponse(cohere_stream(params), media_type="text/plain")
     elif ai_type == "mistral":
-        keys_to_keep = ["message","temperature","max_tokens","top_p","model"]
+        keys_to_keep = ["messages","temperature","max_tokens","top_p","model"]
         mistral_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
-        mistral_dict["message"] = [ChatMessage(role="user", content=mistral_dict["message"])]
-        mistral_dict["messages"] = mistral_dict.pop("message")
+        mistral_dict["messages"] = [ChatMessage(role="user", content=mistral_dict["messages"])]
         params = MistralParam(**mistral_dict)
         return StreamingResponse(mistral_stream(params), media_type="text/plain")
     elif ai_type == "deepseek":
-        keys_to_keep = ["message","temperature","max_tokens","top_p","model","presence_penalty"]
+        keys_to_keep = ["messages","temperature","max_tokens","top_p","model","presence_penalty"]
         deepseek_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
-        deepseek_dict["message"] = [ChatMessage(role="user", content=deepseek_dict["message"])]
-        deepseek_dict["messages"] = deepseek_dict.pop("message")
+        deepseek_dict["messages"] = [ChatMessage(role="user", content=deepseek_dict["messages"])]
         params = DeepseekParam(**deepseek_dict)
         return StreamingResponse(deepseek_stream(params), media_type="text/plain")
-        
+    elif ai_type == "togetherai":
+        keys_to_keep = ["messages","temperature","max_tokens","top_p","model","presence_penalty"]
+        togetherai_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
+        togetherai_dict["messages"] = [ChatMessage(role="user", content=togetherai_dict["messages"])]
+        params = TogetherAiParam(**togetherai_dict)
+        return StreamingResponse(togetherAi_stream(params), media_type="text/plain")
+    elif ai_type == "yi":
+        keys_to_keep = ["messages","temperature","max_tokens","top_p","model","presence_penalty"]
+        Yi_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
+        Yi_dict["messages"] = [ChatMessage(role="user", content=Yi_dict["messages"])]
+        params = YiParam(**Yi_dict)
+        return StreamingResponse(yiAi_stream(params), media_type="text/plain")
+    elif ai_type == "nvidia":
+        keys_to_keep = ["messages","temperature","max_tokens","top_p","model"]
+        nvidia_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
+        nvidia_dict["messages"] = [ChatMessage(role="user", content=nvidia_dict["messages"])]
+        params = NvidiaParam(**nvidia_dict)
+        return StreamingResponse(nvidia_stream(params), media_type="text/plain")
     else:
         return "Invalid AI type"

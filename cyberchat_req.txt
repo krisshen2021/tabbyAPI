@@ -1,5 +1,6 @@
 httpx
 pynvml
+python-dotenv
 openai
 mistralai
 cohere
