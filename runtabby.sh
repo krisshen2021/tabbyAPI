@@ -98,5 +98,5 @@ elif [ "$runlast" = "n" ]; then
  fi
 
  python main.py
-
 fi
+deactivate
