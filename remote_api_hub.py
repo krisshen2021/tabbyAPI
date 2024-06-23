@@ -1,6 +1,5 @@
-import cohere, asyncio, json, os, uvicorn
+import cohere, asyncio, json, os, uvicorn, boto3
 from dotenv import load_dotenv
-from mistralai.async_client import MistralAsyncClient
 from pydantic import BaseModel
 from typing import List, Optional
 from openai import AsyncOpenAI
@@ -16,6 +15,15 @@ deepseek_api_key = os.getenv("deepseek_api_key")
 togetherai_api_key = os.getenv("togetherai_api_key")
 yi_api_key = os.getenv("yi_api_key")
 nvidia_api_key = os.getenv("nvidia_api_key")
+boto3_aws_access_key_id = os.getenv("boto3_aws_access_key_id")
+boto3_aws_secret_access_key = os.getenv("boto3_aws_secret_access_key")
+boto3_aws_region_name = os.getenv("boto3_aws_region_name")
+
+aws_bedrock_config = {
+    "region_name": boto3_aws_region_name,
+    "aws_access_key_id": boto3_aws_access_key_id,
+    "aws_secret_access_key": boto3_aws_secret_access_key,
+}
 
 # api clients for different remote api
 cohere_client = cohere.AsyncClient(api_key=cohere_api_key, timeout=120)
@@ -35,13 +43,15 @@ yi_client = AsyncOpenAI(
 nvidia_client = AsyncOpenAI(
     api_key=nvidia_api_key, base_url="https://integrate.api.nvidia.com/v1", timeout=120
 )
+bedrock_client = boto3.client(service_name="bedrock-runtime", **aws_bedrock_config)
 
 
 # Pydantic models for different remote api params
 class ChatMessage(BaseModel):
     role: str
-    content: str
-    
+    content: str | List
+
+
 class OAIParam(BaseModel):
     messages: List[ChatMessage]
     temperature: Optional[float] = None
@@ -112,6 +122,18 @@ class NvidiaParam(BaseModel):
     model: Optional[str] = "nvidia/nemotron-4-340b-instruct"
 
 
+class ClaudeParam(BaseModel):
+    anthropic_version: Optional[str] = "bedrock-2023-05-31"
+    max_tokens: int = 200
+    messages: List[ChatMessage]
+    system: Optional[str] = None
+    stop: Optional[List[str]] = None
+    temperature: Optional[float] = None
+    top_k: Optional[int] = None
+    top_p: Optional[float] = None
+    model: Optional[str] = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+
+
 async def OAI_stream(base_url: str, api_key: str, params: OAIParam):
     final_text = ""
     oai_client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=120)
@@ -164,6 +186,7 @@ async def cohere_stream(params: CohereParam):
             )
             yield msg
 
+
 async def mistral_stream(params: MistralParam):
     final_text = ""
     data = params.model_dump(exclude_none=True)
@@ -192,6 +215,7 @@ async def mistral_stream(params: MistralParam):
                 }
             )
             yield msg
+
 
 async def deepseek_stream(params: DeepseekParam):
     final_text = ""
@@ -308,6 +332,43 @@ async def nvidia_stream(params: NvidiaParam):
             )
             yield msg
 
+
+async def claude_stream(params: ClaudeParam):
+    final_text = ""
+    data = params.model_dump(exclude_none=True)
+    modelId = data.pop("model")
+    if "stop" in data:
+        data["stop_sequences"] = data.pop("stop")
+    body = json.dumps(data)
+
+    for event in bedrock_client.invoke_model_with_response_stream(
+        modelId=modelId, body=body
+    ).get("body"):
+        chunk = event.get("chunk")
+        if chunk:
+            texts = json.loads(chunk.get("bytes").decode())
+            if texts["type"] == "content_block_delta":
+                # print(texts['delta']['text'], end='',flush=True)
+                msg = json.dumps(
+                    {
+                        "event": "text-generation",
+                        "text": texts["delta"]["text"],
+                    }
+                )
+                final_text += texts["delta"]["text"]
+                yield msg
+                await asyncio.sleep(0.01)
+            elif texts["type"] == "message_delta":
+                msg = json.dumps(
+                    {
+                        "event": "stream-end",
+                        "finish_reason": texts["delta"]["stop_reason"],
+                        "final_text": final_text,
+                    }
+                )
+                yield msg
+
+
 # The main program for individual running #
 async def main():
     app = FastAPI(title="Remote API Routers", description="For Inference easily")
@@ -333,7 +394,7 @@ async def main():
             cohere_dict["preamble"] = cohere_dict.pop("system_prompt")
             params = CohereParam(**cohere_dict)
             return StreamingResponse(cohere_stream(params), media_type="text/plain")
-        
+
         elif ai_type == "mistral":
             keys_to_keep = [
                 "system_prompt",
@@ -353,7 +414,7 @@ async def main():
             ]
             params = MistralParam(**mistral_dict)
             return StreamingResponse(mistral_stream(params), media_type="text/plain")
-        
+
         elif ai_type == "deepseek":
             keys_to_keep = [
                 "system_prompt",
@@ -405,7 +466,9 @@ async def main():
                 "model",
                 "presence_penalty",
             ]
-            Yi_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
+            Yi_dict = {
+                key: params_json[key] for key in keys_to_keep if key in params_json
+            }
             Yi_dict["messages"] = [
                 ChatMessage(role="system", content=Yi_dict["system_prompt"]),
                 ChatMessage(role="user", content=Yi_dict["messages"]),
@@ -431,6 +494,25 @@ async def main():
             ]
             params = NvidiaParam(**nvidia_dict)
             return StreamingResponse(nvidia_stream(params), media_type="text/plain")
+        elif ai_type == "claude":
+            keys_to_keep = [
+                "system_prompt",
+                "messages",
+                "temperature",
+                "max_tokens",
+                "top_p",
+                "stop",
+                "model",
+            ]
+            claude_dict = {
+                key: params_json[key] for key in keys_to_keep if key in params_json
+            }
+            claude_dict["system"] = claude_dict.pop("system_prompt")
+            claude_dict["messages"] = [
+                ChatMessage(role="user", content=claude_dict["messages"]),
+            ]
+            params = ClaudeParam(**claude_dict)
+            return StreamingResponse(claude_stream(params), media_type="text/plain")
         else:
             return "Invalid AI type"
 
@@ -447,7 +529,7 @@ if __name__ == "__main__":
         print("Server has been shut down.")
 else:
     print("Remote Streaming API is imported")
-    
+
     # Below is the Testing Codes
     # API SDK code:
     # async def runtest():

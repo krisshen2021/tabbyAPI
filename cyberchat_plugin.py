@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from remote_api_hub import (
+    ChatMessage,
     cohere_stream,
     CohereParam,
     mistral_stream,
@@ -18,7 +19,9 @@ from remote_api_hub import (
     YiParam,
     nvidia_stream,
     NvidiaParam,
-    ChatMessage
+    claude_stream,
+    ClaudeParam
+    
 )
 
 timeout = Timeout(180.0)
@@ -254,5 +257,23 @@ async def remote_ai_stream(ai_type: str, params_json: dict):
         ]
         params = NvidiaParam(**nvidia_dict)
         return StreamingResponse(nvidia_stream(params), media_type="text/plain")
+    elif ai_type == "claude":
+        keys_to_keep = [
+            "system_prompt",
+            "messages",
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "stop",
+            "model",
+        ]
+        claude_dict = {key: params_json[key] for key in keys_to_keep if key in params_json}
+        claude_dict["system"] = claude_dict.pop("system_prompt")
+        claude_dict["messages"] = [
+            ChatMessage(role="user", content=claude_dict["messages"]),
+        ]
+        params = ClaudeParam(**claude_dict)
+        return StreamingResponse(claude_stream(params), media_type="text/plain")
+            
     else:
         return "Invalid AI type"
